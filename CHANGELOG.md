@@ -1,4 +1,55 @@
 # Changelog
+*`shed` uses [calendar versioning](https://calver.org/), with a year.month.patch scheme.*
+
+#### 2024.10.1 - 2024-04-27
+- Disable `PIE790` fix due to [ruff issue #10538](https://github.com/astral-sh/ruff/issues/10538)
+- [Python 3.8 has reached end-of-life](https://devguide.python.org/versions/),
+  so `shed` targets and runs on Python 3.9 or later.
+
+#### 2024.3.1 - 2024-03-13
+- Replace usage of Autoflake, PyUpgrade and isort with ruff.
+
+#### 2024.1.1 - 2024-01-26
+- Require `black >= 24.1.0`, with their [updated code style](https://black.readthedocs.io/en/stable/change_log.html)
+
+#### 2023.6.1 - 2023-06-29
+- [Python 3.7 has reached end-of-life](https://devguide.python.org/versions/),
+  so `shed` targets and runs on Python 3.8 or later.
+- Clarify error when missing target file looks like an unexpanded glob pattern.
+
+#### 2023.5.2 - 2023-05-26
+- Require latest versions of `black` and `libcst` for bugfixes and perf improvements
+
+#### 2023.5.1 - 2023-05-01
+- `shed --refactor` now merges nested with-statements for Python 3.9+
+- Skip LibCST passes when it (correctly) objects to invalid code accepted by Black
+
+#### 2023.4.1 - 2023-04-19
+- Fixed some crash and incorrect-output bugs in `shed --refactor`
+
+#### 2023.3.1 - 2023-03-05
+- Fixed cases where `shed` took two passes to handle unordered and removable imports
+- Fixed cases where `--refactor` was making unintended semantic changes
+
+#### 2023.2.1 - 2023-02-27
+- Switch to calendar versioning to match underlying tools
+- Fixed cases where `--refactor` could delete comments in parens
+- `--refactor` replaces some calls to `list()`, `tuple()` and `dict()` builtins with literals
+
+#### 0.10.9 - 2023-02-01
+- Require Black >= 23.1.0 for latest code style
+
+#### 0.10.8 - 2022-12-10
+- Reformat `.pyi` files too
+
+#### 0.10.7 - 2022-11-05
+- Fixed `--refactor` to avoid incorrect changes to e.g. `x = y or len(z)`
+- `--refactor` also removes redundant calls to `bool()` in boolean contexts.
+
+#### 0.10.6 - 2022-11-03
+- `--refactor` now splits `assert a and b [and c and ...]` into a separate
+  assertion for each clause, so that it's always clear which (if any) failed.
+- `--refactor` removes redundant calls to `len()` in boolean contexts.
 
 #### 0.10.5 - 2022-10-08
 - Preserve trailing commas in literals in `--refactor` mode

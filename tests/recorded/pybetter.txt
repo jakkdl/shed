@@ -1,12 +1,9 @@
 not (x in y)
+not (x is y)  # ruff E714
 z == None
 a == True
 a == False
 df[df.flag == True]  # doesn't break Pandas code
-
-with a:
-    with b:
-        pass
 
 with a:
     # comment
@@ -16,14 +13,11 @@ with a:
 ================================================================================
 
 x not in y
+x is not y  # ruff E714
 z is None
-a is True
-a is False
+a == True
+a == False
 df[df.flag == True]  # doesn't break Pandas code
-
-with a:
-    with b:
-        pass
 
 with a:
     # comment

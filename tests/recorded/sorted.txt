@@ -1,0 +1,27 @@
+sorted(sorted(xs))
+sorted(sorted(xs), reverse=True)
+sorted(sorted(xs, reverse=True))
+sorted(sorted(xs, reverse=True), reverse=True)
+
+sorted(sorted(xs, key=lambda x: 0))
+sorted(sorted(xs), key=lambda x: 0)
+sorted(sorted(xs, key=lambda x: 1), key=lambda x: 0)
+
+# previously not handled by our codemods, but handled by ruff
+reversed(sorted(xs))
+reversed(sorted(xs, key=lambda x: 0))
+
+================================================================================
+
+sorted(xs)
+sorted(xs, reverse=True)
+sorted(xs)
+sorted(xs, reverse=True)
+
+sorted(sorted(xs, key=lambda x: 0))
+sorted(sorted(xs), key=lambda x: 0)
+sorted(sorted(xs, key=lambda x: 1), key=lambda x: 0)
+
+# previously not handled by our codemods, but handled by ruff
+sorted(xs, reverse=True)
+sorted(xs, key=lambda x: 0, reverse=True)

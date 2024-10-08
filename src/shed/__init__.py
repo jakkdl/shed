@@ -7,21 +7,19 @@ pass the names of specific files to format instead.
 import functools
 import os
 import re
+import subprocess
 import sys
 import textwrap
 import warnings
 from operator import attrgetter
-from typing import Any, FrozenSet, Match, Tuple
+from re import Match
+from typing import Any, FrozenSet, Tuple
 
-import autoflake
 import black
-import isort
-import pyupgrade._main
 from black.mode import TargetVersion
-from black.parsing import InvalidInput, lib2to3_parse
-from isort.exceptions import FileSkipComment
+from black.parsing import lib2to3_parse
 
-__version__ = "0.10.5"
+__version__ = "2024.10.1"
 __all__ = ["shed", "docshed"]
 
 # Conditionally imported in refactor mode to reduce startup latency in the common case
@@ -31,13 +29,103 @@ _run_codemods: Any = None
 _version_map = {
     k: (int(k.name[2]), int(k.name[3:]))
     for k in TargetVersion
-    if k.value >= TargetVersion.PY37.value
+    if k.value >= TargetVersion.PY39.value
 }
 _default_min_version = min(_version_map.values())
 _SUGGESTIONS = (
     # If we fail on invalid syntax, check for detectable wrong-codeblock types
-    (r"^(>>> | In [\d+]: )", "pycon"),
+    (r"^(>>> | ?In \[\d+\]: )", "pycon"),
     (r"^Traceback \(most recent call last\):$", "python-traceback"),
+)
+
+_RUFF_RULES = (
+    "I",  # isort; sort imports
+    "UP",  # pyupgrade
+    # F401 # unused-import # added dynamically
+    "F841",  # unused-variable # was enabled in autoflake
+    # many of these are direct replacements of codemods
+    "F901",  # raise NotImplemented -> raise NotImplementedError
+    "E711",  # == None -> is None
+    "E713",  # not x in y-> x not in y
+    "E714",  # not x is y -> x is not y
+    "C400",  # unnecessary generator -> list comprehension
+    "C401",  # unnecessary generator -> set comprehension
+    "C402",  # unnecessary generator -> dict comprehension
+    "C403",  # unnecessary list comprehension -> set comprehension
+    "C404",  # unnecessary list comprehension -> dict comprehension
+    "C405",  # set(...) -> {...}
+    "C406",  # dict(...) -> {...}
+    "C408",  # empty dict/list/tuple call -> {}/[]/()
+    "C409",  # unnecessary-literal-within-tuple-call
+    "C410",  # unnecessary-literal-within-list-call
+    "C411",  # unnecessary-list-call
+    "C413",  # unnecessary-call-around-sorted
+    # C415 # fix is not available
+    "C416",  # unnecessary-comprehension
+    "C417",  # unnecessary-map
+    "C418",  # unnecessary-literal-within-dict-call
+    "C419",  # unnecessary-comprehension-any-all
+    # Disabled pending https://github.com/astral-sh/ruff/issues/10538
+    # "PIE790",  # unnecessary-placeholder; unnecessary pass/... statement
+    "SIM101",  # duplicate-isinstance-call # Replacing `collapse_isinstance_checks`
+    # partially replaces assert codemod
+    "B011",  # assert False -> raise
+    # ** Codemods that could be replaced once ruffs implementation improves
+    # "PT018",  # break up composite assertions # codemod: `split_assert_and`
+    # Ruff implementation gives up when reaching end of line regardless of python version.
+    # "SIM117", # multiple-with-statement # codemod: `remove_nested_with`
+    # https://github.com/astral-sh/ruff/issues/10245
+    # ruff replaces `sorted(reversed(iterable))` with `sorted(iterable)`
+    # "C414", # unnecessary-double-cast # codemod: `replace_unnecessary_nested_calls`
+    #
+    #
+    # ** These are new fixes that Zac had enabled in his branch
+    # "E731", # don't assign lambdas
+    # "B007",  # unused loop variable
+    # "B009",  # constant getattr
+    # "B010",  # constant setattr
+    # "B013",  # catching 1-tuple
+    # "PIE807"  # reimplementing list
+    # "PIE810",  # repeated startswith/endswith
+    # "RSE102",  # Unnecessary parentheses on raised exception
+    # "RET502",  # `return None` if could return non-None
+    # "RET504",  # Unnecessary assignment before return statement
+    # "SIM110",  # Use any or all
+    # "TCH005",  # remove `if TYPE_CHECKING: pass`
+    # "PLR1711",  # remove useless trailing return
+    # "TRY201",  # `raise` without name
+    # "FLY002",  # static ''.join to f-string
+    # "NPY001",  # deprecated np type aliases
+    # "RUF010",  # f-string conversions
+)
+_RUFF_EXTEND_SAFE_FIXES = (
+    "F841",  # unused variable
+    # Several of C4xx rules are marked unsafe:
+    # "This rule's fix is marked as unsafe, as it may occasionally drop comments when rewriting the call. In most cases, though, comments will be preserved."
+    "C400",
+    "C401",
+    "C402",
+    "C403",
+    "C404",
+    "C405",
+    "C406",
+    "C408",
+    "C409",
+    "C410",
+    "C411",
+    # 'C414',  # currently disabled
+    "C416",
+    "C417",
+    "C418",
+    "C419",
+    # not stated as unsafe by docs, but actually requires --unsafe-fixes
+    "SIM101",
+    "E711",
+    "UP031",
+    # This rule's fix is marked as unsafe, as reversed and reverse=True will yield different results in the event of custom sort keys or equality functions. Specifically, reversed will reverse the order of the collection, while sorted with reverse=True will perform a stable reverse sort, which will preserve the order of elements that compare as equal.
+    "C413",
+    # This rule's fix is marked as unsafe, as changing an assert to a raise will change the behavior of your program when running in optimized mode (python -O).
+    "B011",
 )
 
 
@@ -45,15 +133,12 @@ class ShedSyntaxWarning(SyntaxWarning):
     """Warns that shed has been called on something with invalid syntax."""
 
 
-def _fallback(source: str, **kw: object) -> Tuple[str, object]:
-    return source, None  # pragma: no cover
-
-
-@functools.lru_cache()
+@functools.lru_cache
 def shed(
     source_code: str,
     *,
     refactor: bool = False,
+    is_pyi: bool = False,
     first_party_imports: FrozenSet[str] = frozenset(),
     min_version: Tuple[int, int] = _default_min_version,
     _location: str = "string passed to shed.shed()",
@@ -71,17 +156,10 @@ def shed(
         return ""
 
     # Use black to autodetect our target versions
+    # TODO: we don't want to rely on black
     target_versions = {k for k, v in _version_map.items() if v >= min_version}
     try:
-        # Black errors out if we have pattern matching (3.10+), and the target versions
-        # include older versions.  Very well; we'll add a temporary workaround.
-        try:
-            parsed = lib2to3_parse(source_code.lstrip(), target_versions)
-        except InvalidInput as err:
-            if not re.match(r"Cannot parse: \d+:\d+: match ", str(err)):
-                raise
-            target_versions = {k for k, v in _version_map.items() if v >= (3, 10)}
-            parsed = lib2to3_parse(source_code.lstrip(), target_versions)
+        parsed = lib2to3_parse(source_code.lstrip(), target_versions)
         # black.InvalidInput, blib2to3.pgen2.tokenize.TokenError, SyntaxError...
         # for forwards-compatibility I'm just going general here.
     except Exception as err:
@@ -103,15 +181,8 @@ def shed(
         if "SHED_RAISE" in os.environ:  # pragma: no cover
             raise w
         warnings.warn(w, stacklevel=_location.count(" block in ") + 2)
-        # Even if the code itself has invalid syntax, we might be able to
-        # regex-match and therefore reformat code embedded in docstrings.
-        return docshed(
-            source_code,
-            refactor=refactor,
-            first_party_imports=first_party_imports,
-            min_version=min_version,
-            _location=_location,
-        )
+        return source_code
+
     target_versions &= set(black.detect_target_versions(parsed))
     assert target_versions
     min_version = max(
@@ -128,18 +199,13 @@ def shed(
         global com2ann
         global _run_codemods
         if com2ann is None:
-            from ._codemods import _run_codemods  # type: ignore
+            from com2ann import com2ann
 
-            try:
-                from com2ann import com2ann
-            except ImportError:  # pragma: no cover  # on Python 3.8
-                assert sys.version_info < (3, 8)
-                com2ann = _fallback
-            # OK, everything's imported, back to the runtime logic!
+            from ._codemods import _run_codemods  # type: ignore
 
         # Some tools assume that the file is multi-line, but empty files are valid input.
         source_code += "\n"
-        # Use com2ann to comvert type comments to annotations on Python 3.8+
+        # Use com2ann to comvert type comments to annotations
         annotated = com2ann(
             source_code,
             drop_ellipsis=True,
@@ -151,57 +217,54 @@ def shed(
             # which is possible but rare after the parsing checks above.
             source_code, _ = annotated
 
-    # One tricky thing: running `isort` or `autoflake` can "unlock" further fixes
-    # for `black`, e.g. "pass;#" -> "pass\n#\n" -> "#\n".  We therefore run it
-    # before other fixers, and then (if they made changes) again afterwards.
-    black_mode = black.Mode(target_versions=target_versions)  # type: ignore
+    # ***Black***
+    # Run black first to unlock `remove_pointless_parens_around_call` fixes.
+    # Running it first  unfortunately breaks comment association for `split_assert_and`
+    # and adds a trailing comma in imports in tests/recorded/issue75.txt
+    black_mode = black.Mode(target_versions=target_versions, is_pyi=is_pyi)
     source_code = blackened = black.format_str(source_code, mode=black_mode)
 
-    pyupgrade_min = min(min_version, max(pyupgrade._plugins.imports.REPLACE_EXACT))
-    pu_settings = pyupgrade._main.Settings(min_version=pyupgrade_min)
-    source_code = pyupgrade._main._fix_plugins(source_code, settings=pu_settings)
-    if source_code != blackened:
-        # Second step to converge: without this we have f-string problems.
-        # Upstream issue: https://github.com/asottile/pyupgrade/issues/703
-        source_code = pyupgrade._main._fix_plugins(source_code, settings=pu_settings)
-    source_code = pyupgrade._main._fix_tokens(source_code)
-
-    if refactor:
+    # ***Shed Codemods***
+    # codemods need to run before ruff, since `split_assert` relies on it to remove
+    # needless `pass` statements.
+    if refactor and not is_pyi:
         source_code = _run_codemods(source_code, min_version=min_version)
 
-    try:
-        source_code = isort.code(
-            source_code,
-            known_first_party=first_party_imports,
-            known_local_folder={"tests"},
-            profile="black",
-            combine_as_imports=True,
-        )
-    except FileSkipComment:
-        pass
+    # ***Ruff***
+    select = ",".join(_RUFF_RULES)
+    if _remove_unused_imports:
+        select += ",F401"
+    source_code = subprocess.run(
+        [
+            "ruff",
+            "check",
+            f"--select={select}",
+            "--fix-only",
+            f"--target-version=py3{min_version[1]}",
+            "--isolated",  # ignore configuration files
+            "--exit-zero",  # Exit with 0, even upon detecting lint violations.
+            "--config=lint.isort.combine-as-imports=true",
+            f"--config=lint.isort.known-first-party={list(first_party_imports)}",
+            f"--config=lint.extend-safe-fixes={list(_RUFF_EXTEND_SAFE_FIXES)}",
+            "-",  # pass code on stdin
+        ],
+        input=source_code,
+        encoding="utf-8",
+        check=True,
+        capture_output=True,
+    ).stdout
 
-    source_code = autoflake.fix_code(
-        source_code,
-        expand_star_imports=True,
-        remove_all_unused_imports=_remove_unused_imports,
-    )
-
+    # ***Black***
+    # Run formatter again last, if codemods/ruff did any changes, since they tend to
+    # leave dirty code
     if source_code != blackened:
         source_code = black.format_str(source_code, mode=black_mode)
 
-    # Then shed.docshed (below) formats any code blocks in documentation
-    source_code = docshed(
-        source_code,
-        refactor=refactor,
-        first_party_imports=first_party_imports,
-        min_version=min_version,
-        _location=_location,
-    )
     # Remove any extra trailing whitespace
     return source_code.rstrip() + "\n"
 
 
-@functools.lru_cache()
+@functools.lru_cache
 def docshed(
     source: str,
     *,

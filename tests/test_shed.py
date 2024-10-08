@@ -2,6 +2,8 @@
 
 import ast
 import os
+import re
+import subprocess
 import tempfile
 from pathlib import Path
 
@@ -21,7 +23,21 @@ import unittest
 
 unittest.assertIs(a > b, True)
 """
-NOT_YET_FIXED = ("C402", "C406", "C408", "C409", "C410")
+NOT_YET_FIXED = (
+    "C402",
+    "C406",
+    "C408",
+    "C409",
+    "C410",
+)
+SHOULD_NOT_FIX = (
+    # Removing calls to reversed() changes results of stable sorting.
+    "C413",
+    # This error will fire in cases where it would be inappropriate
+    # to fix automatically (because e.g. sorted has a call to key),
+    # so we can't always reliably fix it.
+    "C414",
+)
 
 
 def check(
@@ -67,13 +83,13 @@ def check(
     errors = [
         err
         for err in ComprehensionChecker(tree).run()
-        if not err[2].startswith(NOT_YET_FIXED)
+        if not err[2].startswith(NOT_YET_FIXED + SHOULD_NOT_FIX)
     ]
     assert not errors
     return result
 
 
-example_kwargs = {"refactor": True, "provides": frozenset(), "min_version": (3, 8)}
+example_kwargs = {"refactor": True, "provides": frozenset(), "min_version": (3, 9)}
 
 
 @given(
@@ -89,7 +105,7 @@ example_kwargs = {"refactor": True, "provides": frozenset(), "min_version": (3, 
     source_code="from.import(A)#",
     refactor=False,
     provides=frozenset(),
-    min_version=(3, 7),
+    min_version=_default_min_version,
 )
 # Minimum-version examples via https://github.com/jwilk/python-syntax-errors/
 @example(source_code="lambda: (x := 0)\n", **example_kwargs)
@@ -100,11 +116,26 @@ example_kwargs = {"refactor": True, "provides": frozenset(), "min_version": (3, 
     source_code="async def f(x): [[x async for x in ...] for y in ()]\n",
     **example_kwargs,
 )
-@settings(suppress_health_check=HealthCheck.all(), deadline=None)
+@settings(suppress_health_check=list(HealthCheck), deadline=None)
 def test_shed_is_idempotent(source_code, refactor, provides, min_version):
     check(source_code, refactor=refactor, min_version=min_version, provides=provides)
 
 
+def _check_if_in_shed_worktree() -> bool:
+    output = subprocess.run(
+        ["git", "rev-parse", "--git-dir"],
+        check=True,
+        timeout=10,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    return bool(re.search(re.escape("/shed/.git/worktrees/"), output))
+
+
+@pytest.mark.xfail(
+    _check_if_in_shed_worktree(),
+    reason="_guess_first_party_modules does not work inside git worktree",
+)
 def test_guesses_shed_is_first_party():
     assert _guess_first_party_modules() == frozenset(["shed"])
 
@@ -115,7 +146,13 @@ def test_guesses_empty_for_non_repo_dirs():
 
 @pytest.mark.parametrize(
     "fname,should",
-    [("a.md", True), ("a.rst", True), ("a.py", True), ("does not exist", False)],
+    [
+        ("a.md", True),
+        ("a.rst", True),
+        ("a.py", True),
+        ("does not exist", False),
+        ("a.pyi", True),
+    ],
 )
 def test_should_format_autodetection(fname, should):
     assert _should_format(fname) == should
@@ -127,6 +164,7 @@ def test_should_format_autodetection(fname, should):
         ("a.md", "Lorem ipsum...", False),
         ("a.rst", "Lorem ipsum...", False),
         ("a.py", "# A comment\n", False),
+        ("a.pyi", "## Another comment\n", False),
         ("a.md", "```python\nprint(\n'hello world')\n```", True),
         ("a.rst", ".. code-block:: python\n\n    'single quotes'\n", True),
         ("a.py", "print(\n'hello world')\n", True),
@@ -145,12 +183,19 @@ def test_rewrite_on_disk(fname, contents, changed):
     assert changed == (contents != result)
 
 
-def test_rewrite_returns_error_message_for_nonexistent_file():
+@pytest.mark.parametrize(
+    "fname, err_msg",
+    [
+        ("nonexistent", "No such file or directory"),
+        ("*.nonexistent", "maybe due to unexpanded glob pattern?"),
+    ],
+)
+def test_rewrite_returns_error_message_for_nonexistent_file(fname, err_msg):
     kwargs = {"refactor": True, "first_party_imports": frozenset()}
     with tempfile.TemporaryDirectory() as dirname:
-        f = Path(dirname) / "nonexistent"
+        f = Path(dirname) / fname
         result = _rewrite_on_disk(str(f), **kwargs)
-        assert isinstance(result, str)
+        assert err_msg in result
         f.write_text("# comment\n")
         assert _rewrite_on_disk(str(f), **kwargs) is False
 
@@ -161,16 +206,16 @@ def test_empty_stays_empty(refactor):
 
 
 @pytest.mark.parametrize(
-    "source_code",
+    "source_code,exception",
     [
-        "this isn't valid Python",
+        ("this isn't valid Python", ShedSyntaxWarning),
         # We request a bug report for valid unhandled syntax, i.e. (upstream) bugs
-        "class A:\\\r# type: ignore\n pass\n",
+        ("class A:\\\r# type: ignore\n pass\n", ShedSyntaxWarning),
     ],
 )
 @pytest.mark.parametrize("refactor", [True, False])
-def test_error_on_invalid_syntax(source_code, refactor):
-    with pytest.raises(Exception):
+def test_error_on_invalid_syntax(source_code, exception, refactor):
+    with pytest.raises(exception):
         assert shed(source_code=source_code, refactor=refactor)
 
 
@@ -212,3 +257,24 @@ def test_on_site_code(py_file):
                 min_version=min_version,
                 except_=lambda: pytest.xfail(reason="Black can't handle that"),
             )
+
+
+def test_first_party_imports() -> None:
+    no_first_party = """import mymod
+import othermod
+
+print(mymod, othermod)
+"""
+    first_party_mymod = """import othermod
+
+import mymod
+
+print(mymod, othermod)
+"""
+
+    assert shed(no_first_party) == no_first_party
+
+    assert (
+        shed(no_first_party, first_party_imports=frozenset(("mymod",)))
+        == first_party_mymod
+    )

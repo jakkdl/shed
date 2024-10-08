@@ -14,16 +14,21 @@ import sys
 import tokenize
 import warnings
 from pathlib import Path
-from typing import FrozenSet, Union
-
-import autoflake
-from isort.api import place_module
+from typing import Callable, FrozenSet, Optional, Union
 
 from . import ShedSyntaxWarning, _version_map, docshed, shed
+from ._is_python_file import is_python_file
+
+if sys.version_info[:2] > (3, 9):  # pragma: no cover
+    from sys import stdlib_module_names
+elif sys.version_info[:2] == (3, 9):  # pragma: no cover
+    from ._stdlib_module_names.py39 import stdlib_module_names
+else:  # pragma: no cover
+    from ._stdlib_module_names.py38 import stdlib_module_names
 
 
-@functools.lru_cache()
-def _get_git_repo_root(cwd: str = None) -> str:
+@functools.lru_cache
+def _get_git_repo_root(cwd: Optional[str] = None) -> str:
     return subprocess.run(
         ["git", "rev-parse", "--show-toplevel"],
         check=True,
@@ -34,9 +39,10 @@ def _get_git_repo_root(cwd: str = None) -> str:
     ).stdout.strip()
 
 
-@functools.lru_cache()
-def _guess_first_party_modules(cwd: str = None) -> FrozenSet[str]:
+@functools.lru_cache
+def _guess_first_party_modules(cwd: Optional[str] = None) -> FrozenSet[str]:
     """Guess the name of the current package for first-party imports."""
+    # Note: this fails inside git worktrees
     try:
         base = _get_git_repo_root(cwd)
     except (subprocess.SubprocessError, FileNotFoundError):
@@ -45,13 +51,17 @@ def _guess_first_party_modules(cwd: str = None) -> FrozenSet[str]:
     return frozenset(
         p
         for p in {Path(base).name} | provides
-        if p.isidentifier() and place_module(p) != "STDLIB"
+        # TODO: isort.place_module is horrendously complicated, but we only use
+        # a fraction of the functionality. So best approach, if we still need
+        # the ability to exclude stdlib modules here, is probably to generate a list of
+        # known stdlib modules - either dynamically or store in a file.
+        if p.isidentifier() and p not in stdlib_module_names
     )
 
 
-@functools.lru_cache(maxsize=None)
+@functools.cache
 def _should_format(fname: str) -> bool:
-    return fname.endswith((".md", ".rst")) or autoflake.is_python_file(fname)
+    return fname.endswith((".md", ".rst", ".pyi")) or is_python_file(fname)
 
 
 def _rewrite_on_disk(
@@ -66,8 +76,17 @@ def _rewrite_on_disk(
             on_disk = wrapper.read()
     except (OSError, UnicodeError) as err:
         # Permissions or encoding issue, or file deleted since last commit.
-        return f"skipping {fname!r} due to {err}"
-    writer = docshed if fname.endswith((".md", ".rst")) else shed
+        err_msg = f"skipping {fname!r} due to {err}"
+        if "*" in fname:
+            err_msg += ", maybe due to unexpanded glob pattern?"
+        return err_msg
+    if fname.endswith((".md", ".rst")):
+        writer: Callable[..., str] = docshed
+    elif fname.endswith(".pyi"):
+        writer = functools.partial(shed, is_pyi=True)
+    else:
+        writer = shed
+
     msg = ""
     try:
         with warnings.catch_warnings(record=True) as record:
@@ -76,7 +95,7 @@ def _rewrite_on_disk(
         if "SHED_RAISE" in os.environ:
             raise
         return (
-            f"Internal error formatting {fname!r}: {type(err).__name__}: {err}\n"
+            f"Skipping {fname!r} due to an internal error: {type(err).__name__}: {err}\n"
             "    Please report this to https://github.com/Zac-HD/shed/issues"
         )
     else:

@@ -18,22 +18,18 @@ or explicitly passed a list of files to format on the command-line.
 ## Features
 `shed`...
 
-- Runs [`autoflake`](https://pypi.org/project/autoflake/),
-  to remove unused imports and variables
-- Runs [`pyupgrade`](https://pypi.org/project/pyupgrade/),
-  with autodetected minimum version >= py37
-- Runs [`isort`](https://pypi.org/project/isort/),
-  with autodetected first-party imports and `--ca --profile=black` args
+- Runs [`ruff`](https://pypi.org/project/ruff/),
+  to remove unused imports and variables, upgrade code, sort imports, and more.
 - Runs [`black`](https://pypi.org/project/black/),
-  with autodetected minimum version >= py37
+  with autodetected minimum version >= py38
 - Formats code blocks in docstrings, markdown, and restructured text docs
   (based on [`blacken-docs`](https://pypi.org/project/blacken-docs/)).
 - If `shed --refactor`, also runs [`com2ann`](https://pypi.org/project/com2ann/)
-  and custom refactoring logic using [`libcst`](https://pypi.org/project/libcst/).
+  and custom refactoring logic using [`libcst`](https://pypi.org/project/libcst/). See documentation for the codemods in [CODEMODS.md](CODEMODS.md)
 
 The version detection logic is provided by `black`.  Because `shed` supports the same
 [versions of Python as upstream](https://devguide.python.org/#status-of-python-branches),
-it assumes that the minimum version is Python 3.7.
+it assumes that the minimum version is Python 3.8.
 
 If you run `shed` in a Git repository, the name of the root directory is assumed to be a
 first-party import.  [`src` layout](https://hynek.me/articles/testing-packaging/)
@@ -63,11 +59,11 @@ adding the following to your `.pre-commit-config.yaml`:
 minimum_pre_commit_version: '2.9.0'
 repos:
 - repo: https://github.com/Zac-HD/shed
-  rev: 0.10.5
+  rev: 2024.10.1
   hooks:
     - id: shed
-      # args: [--refactor, --py39-plus]
-      types_or: [python, markdown, rst]
+      # args: [--refactor, --py311-plus]
+      types_or: [python, pyi, markdown, rst]
 ```
 
 This is often considerably faster for large projects, because `pre-commit`
@@ -80,6 +76,14 @@ for breaking changes, [check out `flynt`](https://github.com/ikamensh/flynt).
 
 For Django upgrades, see [`django-codemod`](https://github.com/browniebroke/django-codemod)
 or [`django-upgrade`](https://github.com/adamchainz/django-upgrade).
+
+The [`ssort` project](https://pypi.org/project/ssort/) sorts the contents of
+python modules so that statements are placed after the things they depend on,
+for easier navigation and consistency of design.
+
+[`Semgrep` supports some autofixes](https://r2c.dev/blog/2022/autofixing-code-with-semgrep/#the-results),
+with patterns for a wide variety of languages.  This includes a variety of both
+security and style checks, with manual inspection of results recommended.
 
 ## Changelog
 
